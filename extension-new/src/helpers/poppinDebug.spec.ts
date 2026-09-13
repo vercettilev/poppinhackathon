@@ -125,3 +125,72 @@ describe("the diagnostic channel", () => {
     expect(info).toHaveBeenCalledOnce()
   })
 })
+
+// Measured on a live Reddit page: a reader with diagnostics ON saw no
+// poppin line at all, and read that as "the strip never ran". It had run.
+// The flag arrives on a promise from chrome.storage, so everything said in
+// the first few hundred milliseconds of a page — which is when a strip
+// reports what it decided and what it found — was being dropped.
+describe("lines said before the flag lands", () => {
+  it("are printed once the flag turns out to be on", async () => {
+    const seen: string[] = []
+    vi.spyOn(console, "info").mockImplementation((...a: unknown[]) => {
+      seen.push(a.slice(1).join(" "))
+    })
+    let settle: (v: Record<string, unknown>) => void = () => {}
+    const pending = new Promise<Record<string, unknown>>((r) => (settle = r))
+    ;(globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: { get: () => pending },
+        onChanged: { addListener: () => {} },
+      },
+    }
+    vi.resetModules()
+    const { dbg } = await import("./poppinDebug")
+
+    dbg("strip booting on www.reddit.com")
+    expect(seen, "nothing prints while the flag is in flight").toEqual([])
+
+    settle({ poppin_debug: true })
+    await pending
+    await Promise.resolve()
+
+    expect(seen).toContain("strip booting on www.reddit.com")
+  })
+})
+
+// The hatch exists for the case where the panel toggle is unreachable: a
+// freshly loaded unpacked build carries an EMPTY chrome.storage, so its
+// switch reads off even though the same reader had it on a minute earlier
+// in another install. It used to lose that race — the storage read landed
+// a few hundred milliseconds later and assigned `armed` outright, so the
+// reader got diagnostics for a moment and then silence.
+describe("the localStorage escape hatch", () => {
+  it("outranks a storage read that says off", async () => {
+    const seen: string[] = []
+    vi.spyOn(console, "info").mockImplementation((...a: unknown[]) => {
+      seen.push(a.slice(1).join(" "))
+    })
+    localStorage.setItem("poppin:debug", "1")
+    const answered = Promise.resolve({})
+    ;(globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: { get: () => answered },
+        onChanged: { addListener: () => {} },
+      },
+    }
+    vi.resetModules()
+    const { dbg } = await import("./poppinDebug")
+
+    dbg("before the read lands")
+    await answered
+    await Promise.resolve()
+    dbg("after the read said nothing")
+
+    expect(seen).toContain("before the read lands")
+    expect(seen, "the hatch must survive the storage answer").toContain(
+      "after the read said nothing",
+    )
+    localStorage.removeItem?.("poppin:debug")
+  })
+})

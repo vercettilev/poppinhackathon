@@ -14,6 +14,9 @@ import {
   JUICE_SHEEN,
 } from "~/theme/juice"
 import { createScanTally } from "~/helpers/scanTally"
+import type { SiteAdapter } from "./siteAdapter"
+import { REDDIT_SITE } from "./redditSite"
+import { X_SITE } from "./xSite"
 import { dbg } from "~/helpers/poppinDebug"
 import { drawLineFromLeft } from "~/helpers/lineDraw"
 import { priceText } from "~/helpers/priceText"
@@ -172,9 +175,11 @@ const GAIN_PCTS = [10, 25, 50] as const
  */
 const SELL_PCTS = [25, 50, 100] as const
 
-const CELL = 'div[data-testid="cellInnerDiv"]'
-const ARTICLE = 'article[data-testid="tweet"]'
-const TEXT = '[data-testid="tweetText"]'
+/**
+ * The site the strip is reading. X until a second adapter is passed in, and
+ * every selector below comes from it rather than from a constant here, so a
+ * second feed is an object rather than a second copy of this file.
+ */
 const ID_ATTR = "data-poppin-x"
 
 const ACCENT = JUICE.accent
@@ -216,42 +221,44 @@ export interface TweetFacts {
  * permalink yet — X renders in stages, and a half-rendered tweet is "ask
  * again later", not "no".
  */
-export function extractTweet(article: Element): TweetFacts | null {
-  let id: string | null = null
-  let href: string | null = null
-  for (const a of article.querySelectorAll('a[href*="/status/"]')) {
-    const raw = a.getAttribute("href") ?? ""
-    const m = /\/status\/(\d+)/.exec(raw)
-    if (m) {
-      id = m[1]
-      href = raw
-      break
-    }
-  }
-  if (!id || !href) return null
-  const url = href.startsWith("http") ? href : `https://x.com${href}`
-  // /<handle>/status/<id> — the same string the permalink is built from.
-  const author = /^\/?([^/]+)\/status\//.exec(href.replace(/^https?:\/\/[^/]+/, ""))?.[1] ?? ""
-
+export function extractTweet(article: Element, site: SiteAdapter = X_SITE): TweetFacts | null {
+  const link = site.permalink(article)
+  if (!link) return null
+  const { id, url } = link
+  const author = site.authorOf(url, article) ?? ""
+  const textEls = site.textNodes(article)
+  const text = [site.title(article), ...textEls.map((el) => el.textContent ?? "")]
+    .filter((part) => part.length > 0)
+    .join("\n")
   /**
-   * EVERY tweetText IN THE ARTICLE, not the first one.
+   * CASHTAGS FROM THE LINKS, THEN FROM THE WORDS.
    *
-   * A quote tweet nests the quoted post's own tweetText inside the same
-   * article, and reading only the first threw the quote away. Field case:
-   * "The weekly chart now also looks very similar to the 2023 bull run's
-   * starting breakout." quoting "I think BTC is behaving…" — every word
-   * that names the asset lived in the half we discarded. The quote is part
-   * of what the author put on screen; it is evidence like the rest.
+   * Reading only the anchors was right for X and wrong as a rule: X
+   * linkifies a cashtag when it recognises the symbol and leaves it as
+   * plain text when it does not, which is precisely the case for a young
+   * token, the one a reader is most likely to be looking at. Measured in
+   * the field: a sweep of seventy cells on a live timeline reported ONE
+   * cashtag, on a feed that visibly carried more.
+   *
+   * The anchors still go first, because an anchor is the site saying "this
+   * is a symbol" and it carries the exact casing. The scan of the words
+   * only adds what the anchors missed, and it is what a feed that
+   * linkifies nothing, Reddit or a news page, will rely on entirely.
    */
-  const textEls = [...article.querySelectorAll(TEXT)]
-  const text = textEls.map((el) => el.textContent ?? "").join("\n")
   const cashtags: string[] = []
-  for (const textEl of textEls) {
-    for (const a of textEl.querySelectorAll("a")) {
-      const t = (a.textContent ?? "").trim()
-      if (t.startsWith("$") && t.length > 1) cashtags.push(t)
-    }
+  const seen = new Set<string>()
+  const take = (raw: string): void => {
+    const t = raw.trim()
+    if (t.length < 2 || !t.startsWith("$")) return
+    const key = t.toUpperCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    cashtags.push(t)
   }
+  for (const textEl of textEls) {
+    for (const a of textEl.querySelectorAll("a")) take(a.textContent ?? "")
+  }
+  for (const m of text.matchAll(/\$[A-Za-z][A-Za-z0-9]{0,14}\b/g)) take(m[0])
   return { id, url, text, cashtags, author }
 }
 
@@ -283,6 +290,9 @@ function onScreen(el: Element): boolean {
 }
 
 export interface XStripDeps {
+  /** The feed being read. Omitted means X, which is every caller today. */
+  site?: SiteAdapter
+
   /** Full asset by mint — the same call the panel's strip uses. Cached here. */
   enrich(mint: string): Promise<MatchedAsset | null>
   /**
@@ -622,11 +632,24 @@ export interface XStripController {
   updatePrice(mint: string, usdPrice: number, change24hPct: number | null): void
   /** A sign-in landed elsewhere: drop the 401 verdict, warm fresh, repaint. */
   onSignedIn(): void
+  /** Print what the last pass saw, even if it saw nothing. Diagnostics only. */
+  reportSweep(): void
 }
 
 type Book = NonNullable<Awaited<ReturnType<NonNullable<XStripDeps["book"]>>>>
 
 export function createXStrip(deps: XStripDeps): XStripController {
+  /**
+   * WHICH FEED THIS INSTANCE IS READING. X unless told otherwise, so every
+   * existing caller keeps the behaviour it had. Held per instance rather
+   * than per module because two feeds can be open in two tabs at once, and
+   * a module-level selector would have made the second tab read the first
+   * one's DOM.
+   */
+  const site = deps.site ?? X_SITE
+  const CELL = site.cell
+  const ARTICLE = site.post
+
   /**
    * A MEASUREMENT MUST NEVER STOP THE THING IT MEASURES.
    *
@@ -1008,8 +1031,18 @@ export function createXStrip(deps: XStripDeps): XStripController {
     ceiling: 0,
     named: new Set<string>(),
   }
-  let sweepSaid = 0
+  let sweepSaid = -1
   let sweepTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * The first report always speaks, even when it has nothing to report.
+   *
+   * The earlier version only spoke when the count had moved, so a strip
+   * that found NO posts said nothing — which is indistinguishable from a
+   * strip that never started, and is precisely the case a reader is trying
+   * to diagnose. Measured on Reddit: no line at all, and the absence was
+   * read as "the strip never ran" when the truth was "the selectors found
+   * nothing". A diagnostic that cannot report zero cannot do its job.
+   */
   const saySweep = (): void => {
     if (sweepTimer) return
     sweepTimer = setTimeout(() => {
@@ -1030,7 +1063,10 @@ export function createXStrip(deps: XStripDeps): XStripController {
   function processCell(cell: Element): void {
     sweep.cells++
     saySweep()
-    const article = cell.querySelector(ARTICLE)
+    // The cell IS the post on a site that has no wrapper around it. Reddit
+    // measured [0 article, 1 shreddit-post] on a post page, so a lookup
+    // that only ever searched INSIDE the cell found nothing at all there.
+    const article = cell.matches?.(ARTICLE) ? cell : cell.querySelector(ARTICLE)
     if (!article) {
       sweep.noArticle++
       // Recycled into a non-tweet (separator, "show more"). Whatever we
@@ -1040,7 +1076,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
       return
     }
 
-    const facts = extractTweet(article)
+    const facts = extractTweet(article, site)
     if (!facts) {
       sweep.half++
       return // half-rendered; a later mutation will bring the rest
@@ -7680,7 +7716,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
      * under it either way. The article stays as the fallback for a layout
      * where that row is absent.
      */
-    const actionRow = [...article.querySelectorAll('[role="group"]')].pop()
+    const actionRow = site.actionRow(article)
     if (actionRow?.parentElement) actionRow.insertAdjacentElement("afterend", host)
     else article.insertAdjacentElement("afterend", host)
     sweep.mounted++
@@ -7707,7 +7743,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
      * fallback for the article-level insertion, where there is no row.
      * Measured after insertion: before it, the host has no geometry.
      */
-    const rail = actionRow ?? article.querySelector(TEXT)
+    const rail = actionRow ?? site.textNodes(article)[0] ?? null
     /**
      * READ NOW, WRITE LATER — or, on its own, read then write.
      *
@@ -7874,6 +7910,9 @@ export function createXStrip(deps: XStripDeps): XStripController {
      * the verdict, warm the fresh read, and let every mounted strip's wal
      * repaint - the sheet's own verdict re-reads on its next paint.
      */
+    reportSweep() {
+      saySweep()
+    },
     onSignedIn() {
       bookAuth = "unknown"
       bookOnce = null
@@ -7919,8 +7958,19 @@ export function createXStrip(deps: XStripDeps): XStripController {
 }
 
 /** Hosts this feature exists on. Everywhere else it must cost zero. */
+/**
+ * THE FEEDS THE STRIP KNOWS. Order is precedence, and nothing overlaps
+ * today; a host that matched two adapters would take the first, which is
+ * the right failure because the alternative is two chips on one post.
+ */
+export const SITES: readonly SiteAdapter[] = [X_SITE, REDDIT_SITE]
+
+export function siteFor(hostname: string): SiteAdapter | null {
+  return SITES.find((s) => s.matches(hostname)) ?? null
+}
+
 export function isXHost(hostname: string): boolean {
-  return /(^|\.)x\.com$|(^|\.)twitter\.com$/.test(hostname)
+  return X_SITE.matches(hostname)
 }
 
 /**
@@ -7943,7 +7993,8 @@ export async function initXStrip(
     fetchConfig(): Promise<{ enabled: boolean; disabledMints: string[] }>
   },
 ): Promise<XStripController | null> {
-  if (!isXHost(location.hostname)) return null
+  const site = siteFor(location.hostname)
+  if (!site) return null
 
   /**
    * THE BOOT IS AUDIBLE NOW, because its silence was being read as evidence.
@@ -7956,7 +8007,7 @@ export async function initXStrip(
    * below now say which one happened, and a reader can tell the two apart
    * without reading this file.
    */
-  dbg(`x strip booting on ${location.hostname}`)
+  dbg(`strip booting on ${location.hostname}, reading it as ${site.id}`)
 
   // FAIL CLOSED, WITH A MEMORY (audit P2-28).
   //
@@ -7979,19 +8030,23 @@ export async function initXStrip(
     void writeXStripConfigCache(cfg)
   } catch {
     cfg = (await readXStripConfigCache()) ?? X_STRIP_FAIL_CLOSED
-    dbg(`x strip config unreachable, fell back to ${cfg.enabled ? "the last good answer" : "off"}`)
+    dbg(`strip config unreachable, fell back to ${cfg.enabled ? "the last good answer" : "off"}`)
   }
   if (!cfg.enabled) {
-    dbg("x strip is off: the kill switch says disabled")
+    dbg(`${site.id} strip is off: the kill switch says disabled`)
     return null
   }
 
   const ctl = createXStrip({
     // Spread, so a dep added to XStripDeps arrives here by existing.
     ...deps,
+    site,
     disabledMints: new Set(cfg.disabledMints),
   }) as XStripController & { start(): void }
   ctl.start()
-  dbg(`x strip watching, ${cfg.disabledMints.length} mints disabled`)
+  dbg(`${site.id} strip watching, ${cfg.disabledMints.length} mints disabled`)
+  // Speak once even if the first pass matched nothing, so silence always
+  // means "not running" and never "running and empty".
+  setTimeout(() => ctl.reportSweep(), 3000)
   return ctl
 }

@@ -300,6 +300,15 @@ const HANDLE_ALIASES: ReadonlyArray<readonly [string, string]> = [
   ["robinhoodapp", "HOODx"],
   ["palantirtech", "PLTRx"],
   ["gamestop", "GMEx"],
+  ["apple", "AAPLx"],
+  ["microsoft", "MSFTx"],
+  ["google", "GOOGLx"],
+  ["amazon", "AMZNx"],
+  ["meta", "METAx"],
+  ["broadcom", "AVGOx"],
+  ["mcdonalds", "MCDx"],
+  ["microstrategy", "MSTRx"],
+  ["strategy", "MSTRx"],
 ]
 
 /**

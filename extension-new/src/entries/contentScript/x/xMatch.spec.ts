@@ -737,3 +737,35 @@ describe("the pump.fun account", () => {
     expect(matchTweet("Pumpfun ships Holder Rewards", [], undefined, "someone")?.row.ticker).toBe("PUMP")
   })
 })
+
+// The catalog carries eighteen tokenized equities and the handle list named
+// seven of them, so @Apple posting about Apple produced nothing while @tesla
+// produced TSLAx. An account that IS a listed company is the same evidence
+// in both cases. The rest are wired now.
+describe("the listed companies", () => {
+  it("are read from their own account", () => {
+    resetXMatchIndex()
+    const expected: ReadonlyArray<readonly [string, string]> = [
+      ["apple", "AAPLx"],
+      ["microsoft", "MSFTx"],
+      ["google", "GOOGLx"],
+      ["amazon", "AMZNx"],
+      ["meta", "METAx"],
+      ["broadcom", "AVGOx"],
+      ["mcdonalds", "MCDx"],
+      ["strategy", "MSTRx"],
+    ]
+    for (const [handle, ticker] of expected) {
+      const m = matchTweet("big news today", [], undefined, handle)
+      expect(m?.row.ticker, `@${handle}`).toBe(ticker)
+      expect(m?.tier, `@${handle}`).toBe("handle")
+    }
+  })
+
+  it("are read from the cashtag people actually type, without the x", () => {
+    resetXMatchIndex()
+    for (const [tag, ticker] of [["$NVDA", "NVDAx"], ["$TSLA", "TSLAx"], ["$SPY", "SPYx"]] as const) {
+      expect(resolveCashtag(tag)?.ticker, tag).toBe(ticker)
+    }
+  })
+})

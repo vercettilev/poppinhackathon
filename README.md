@@ -17,14 +17,14 @@ apps/backend/src/asset-match/              the server side of recognition
 
 Roughly three hundred files, a month of work.
 
-## Run the engine
+## Run it
 
 ```
 npm install
 npm test
 ```
 
-That runs the recognition engine against 72 rules it is not allowed to break. It is the only suite wired to run here, because it is the only part that stands alone: it takes a string and returns an answer. The rest of the source is published to be read rather than executed, since the product it belongs to is not.
+That runs 91 rules the recognition engine and the two site adapters are not allowed to break. These are the parts that stand alone: they take a page, or a string, and return an answer. The rest of the source is published to be read rather than executed, since the product it belongs to is not.
 
 ## The hard part
 

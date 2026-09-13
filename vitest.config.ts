@@ -22,6 +22,11 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["extension-new/src/entries/contentScript/x/xMatch.spec.ts"],
+    environment: "jsdom",
+    include: [
+      "extension-new/src/entries/contentScript/x/xMatch.spec.ts",
+      "extension-new/src/entries/contentScript/x/xSite.spec.ts",
+      "extension-new/src/entries/contentScript/x/redditSite.spec.ts",
+    ],
   },
 })
