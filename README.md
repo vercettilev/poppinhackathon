@@ -1,6 +1,8 @@
 # Poppin
 
-Poppin puts Buy and Sell buttons inside the page you are already reading. You see a post about Tesla on X, Reddit or a news site, and you buy TSLAx right there, in USDC, on Solana.
+Poppin lets you buy and sell tokenized stocks inside the tweet, the Reddit post or the news headline you are already reading. You see a post about Tesla on X, and you buy TSLAx right there, in USDC, on Solana. No new tab, no order form, no wallet popup, and the gas is on us.
+
+**[Install it from the Chrome Web Store](https://chromewebstore.google.com/detail/poppin-trade-on-your-feed/chhcknncbbmnmhkaacbkfdmkahaemdkk)**. It is live today, and everything described here is what is actually running.
 
 This repository is the code written **after the pivot**: on 12 August 2026 Poppin stopped being a prediction-market product and became a trading one, and everything here was written since. Nothing from before that date is included, which is why some files reach for a neighbour that is not in the tree.
 
@@ -45,6 +47,12 @@ Two guards sit across all of it. An author whose handle names an asset vouches n
 ## Why the comments are long
 
 About half of `xMatch.ts` is prose, and the same is true of much of the rest. Each block records a case measured on a live page and the rule that came out of it: the account that announced its own airdrop and mentioned itself nowhere in the body, the thread headed "ORE Liquidity" that got nothing because the evidence was the author rather than the text, the ticker that is also an English verb, the font the manifest never exposed so the browser faked the weight for weeks. The tests are written the same way. They are the specification, and the comments are the reason each line of it exists.
+
+## What it stands on
+
+We do not create any of these assets. The listed companies come from **xStocks**, the ones that have not gone public come from **PreStocks**, and **Jupiter** handles the routing.
+
+That matters more than it sounds. A broker cannot put their app inside someone else's web page, so nobody can build this on top of a brokerage. It works because the stock is just a token on Solana. And when someone tokenizes a new company, it shows up in Poppin without us doing anything.
 
 ## What is not here
 
