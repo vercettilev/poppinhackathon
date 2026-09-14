@@ -27,6 +27,8 @@ export default defineConfig({
       "extension-new/src/entries/contentScript/x/xMatch.spec.ts",
       "extension-new/src/entries/contentScript/x/xSite.spec.ts",
       "extension-new/src/entries/contentScript/x/redditSite.spec.ts",
+      "extension-new/src/entries/contentScript/x/newsSite.spec.ts",
+      "extension-new/src/helpers/pageIsLight.spec.ts",
     ],
   },
 })

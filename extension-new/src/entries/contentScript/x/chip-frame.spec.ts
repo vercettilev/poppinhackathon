@@ -316,22 +316,30 @@ describe("the opened frame holds its keys off the edge", () => {
     expect(frame - INSET).toBe(key / 2)
   })
 
-  it("charges the row nothing for the inset", () => {
-    /**
-     * .end carries a comment saying in so many words that its numbers were
-     * MEASURED against a ~500px tweet column after a field report clipped
-     * a ticker to "BU…", and that changing them means re-measuring. So the
-     * inset is PAID FOR rather than spent: the padding the row takes comes
-     * back out of the 6px .face uses to seat the badge inside a capsule
-     * the open state no longer paints, plus the seam .end puts in front of
-     * the tail. Net width cost of opening: zero.
-     */
-    const spent = INSET * 2
+  /**
+   * REWRITTEN. This used to require that opening cost the row NO width,
+   * with the bill split between the face's badge padding and the seam .end
+   * puts in front of the tail. The seam half retired with the geometry it
+   * belonged to: .end was right-aligned then, pinned to the far edge of a
+   * ~500px column, and its padding was the gap in front of that tail. The
+   * cluster follows the price now, and the only thing that payment bought
+   * was Buy and Sell sliding 4px left the moment a reader opened the
+   * chart — movement on the two controls that must never move.
+   *
+   * So the face still pays its half and the chip is one inset wider open
+   * than closed. What the rule was really protecting is the LEFT edge,
+   * where a ticker was once clipped to "BU…", and that is untouched: the
+   * test below pins the badge, and the face's payment is what keeps it
+   * still.
+   */
+  it("pays for the inset out of the face, and nothing out of the keys", () => {
     const fromFace =
       pad(props(".face").get("padding")).left - px(props(".chip.open .face").get("padding-left"))
-    const fromSeam =
+    expect(fromFace).toBe(INSET)
+
+    const seam =
       px(props(".end").get("padding-left")) - px(props(".chip.open .end").get("padding-left"))
-    expect(fromFace + fromSeam).toBe(spent)
+    expect(seam, "the keys must not shift when the chip opens").toBe(0)
   })
 
   it("does not move the left cluster when the chip opens", () => {
@@ -342,5 +350,182 @@ describe("the opened frame holds its keys off the edge", () => {
     const resting = pad(props(".face").get("padding")).left
     const open = INSET + px(props(".chip.open .face").get("padding-left"))
     expect(open).toBe(resting)
+  })
+})
+
+// Field note from Reddit: the resting chip carried the company's logo, the
+// host's own accent colour and the word "Buy", and nothing anywhere said
+// Poppin. On a page about money an unattributed Buy button is
+// indistinguishable from something malicious.
+describe("the signature", () => {
+  const SRC = readFileSync(join(__dirname, "xStrip.ts"), "utf8")
+
+  it("is on the resting row, with the money", () => {
+    expect(SRC, "the resting chip must say who put it there").toContain("poppinMark()")
+    expect(props(".pmark").size, "and it needs a style to be seen at all").toBeGreaterThan(0)
+  })
+
+  // The first attempt put the logo here at 13px and it became a sixth icon
+  // in a row of icons: the eye counted a control it could not name, which
+  // is the opposite of what a signature is for. Type cannot be mistaken for
+  // a button.
+  it("is a word, so it cannot be read as another control", () => {
+    expect(SRC).toContain('m.textContent = "poppin"')
+    expect(props(".pmark").has("background"), "a glyph would compete with the keys").toBe(false)
+  })
+
+  // A signature set in the host's font is not a signature. The first pass
+  // wrote Poppin in TwitterChirp, which is the chip's body face precisely
+  // because the body is trying to look native. This is the one place our
+  // own type belongs.
+  it("is set in our face, not the host's", () => {
+    expect(props(".pmark").get("font")).toContain("PoppinSans")
+    expect(SRC, "and the face has to be registered on the document first").toContain(
+      "ensureBrandFont()",
+    )
+  })
+
+  // A signature under every post in a feed is the same mistake as a control
+  // under every post: repeated often enough it stops being information.
+  it("rests hidden and arrives with the pointer", () => {
+    expect(props(".pmark").get("opacity")).toBe("0")
+    expect(SRC).toContain(".chip:hover .pmark")
+  })
+
+  // Opening between the price and Buy moved the primary action ~115px to
+  // the right exactly as a reader was travelling towards it: the button ran
+  // away from the pointer reaching for it. They open rightward now, into
+  // empty column, and the keys never move.
+  it("opens to the right of the keys, so the keys never move", () => {
+    expect(SRC).toContain("order: 1;")
+    expect(SRC).not.toContain("order: -1;")
+  })
+
+  // Identity answers first: the question a hovering reader is asking is
+  // what this thing is, not where their wallet went.
+  it("leads the stagger, and the wallet closes it", () => {
+    expect(SRC).toContain(".chip:focus-within .pmark { transition-delay: 0ms; }")
+    expect(SRC).toContain(".chip:focus-within .ring { transition-delay: 55ms; }")
+    expect(SRC).toContain(".chip:focus-within .wal { transition-delay: 110ms; }")
+  })
+
+  // A notification nobody can see is not a notification, so this one case
+  // does not wait for a pointer.
+  it("holds the bell open when there is something to read", () => {
+    expect(SRC).toContain(".ring:has(.wal-dot:not([hidden]))")
+    expect(SRC).toContain(".wal:has(.wal-dot:not([hidden]))")
+  })
+
+  it("lets the two doors rest closed and return for the pointer", () => {
+    // .ring is the bell; .bell is a class the markup never sets, and
+    // targeting it hid the wallet while the bell stayed put.
+    const closed = props(".pmark, .ring, .wal")
+    expect(closed.get("opacity"), "secondary glyphs rest invisible").toBe("0")
+    expect(closed.get("max-width"), "and hold no width, so the keys meet the price").toBe("0")
+    expect(closed.get("pointer-events"), "a control nobody can see must not be pressable").toBe(
+      "none",
+    )
+    expect(SRC, "and come back when the wallet has something to say").toContain(
+      ".wal:has(.wal-dot:not([hidden]))",
+    )
+  })
+})
+
+// Reported from the field as "Sell looks switched off". Both segmented
+// controls drew the unchosen option in the dimmest ink in the palette, on
+// no ground, beside a sibling wearing a full gradient — which is how a
+// surface says disabled, and the wrong thing to say about a direction the
+// reader can absolutely take.
+describe("an unchosen option", () => {
+  it("is not drawn as a disabled one", () => {
+    for (const sel of [".segb", ".kindb"]) {
+      const r = props(sel)
+      expect(r.get("color"), `${sel} uses the dimmest ink`).not.toContain("text3")
+      expect(r.has("background"), `${sel} has nothing to sit on`).toBe(true)
+    }
+  })
+
+  it("still loses clearly to the one that was chosen", () => {
+    // The ground is a wash; the chosen sibling keeps a fill. If this ever
+    // inverts, the sheet stops saying which way the reader picked.
+    for (const [, alpha] of props(".segb").get("background")?.matchAll(/\.(\d+)\)/g) ?? []) {
+      expect(Number(`0.${alpha}`)).toBeLessThan(0.2)
+    }
+  })
+})
+
+// Seen on a CNBC article: a row under the headline and, at the same
+// moment, the page card's tab on the right rail — two Poppin surfaces
+// answering the same question about the same asset.
+describe("one Poppin surface per page", () => {
+  const src = readFileSync(join(__dirname, "xStrip.ts"), "utf8")
+
+  it("tells the host the first time a chip lands", () => {
+    expect(src).toContain("deps.onFirstChip?.()")
+  })
+
+  it("tells it once, because a feed mounts dozens", () => {
+    expect(src).toContain("if (!toldTheHost) {")
+    expect(src).toContain("toldTheHost = true")
+  })
+
+  it("never lets that call break the chip", () => {
+    // The host's housekeeping is not the chip's problem.
+    const at = src.indexOf("deps.onFirstChip?.()")
+    expect(src.slice(at - 40, at + 80)).toContain("try {")
+  })
+})
+
+// Measured on CNBC: the row under the headline AND the page card's tab on
+// the right rail, at once. The first fix destroyed spotController from the
+// chip's callback and did nothing — there was no controller yet. The two
+// surfaces do not race fairly: the strip reads the page itself and mounts
+// in milliseconds, the card waits on /embed/asset/match.
+describe("the card stands down whenever it arrives", () => {
+  const host = readFileSync(join(__dirname, "../primary/main.tsx"), "utf8")
+
+  it("remembers that a chip landed, rather than acting once", () => {
+    expect(host).toContain("let chipOwnsThePage = false")
+    expect(host).toContain("chipOwnsThePage = true")
+  })
+
+  it("destroys a card that arrives after the chip", () => {
+    // Three paths build a card on their own: the first attach, a
+    // single-page navigation, and a replacement from inside the card.
+    // Each has to ask, or the flag is a comment rather than a rule.
+    const asks = host.split("if (chipOwnsThePage)").length - 1
+    expect(asks, "every automatic path must ask").toBeGreaterThanOrEqual(3)
+  })
+
+  // openTrade is the exception and stays one: the reader pressed Buy on the
+  // chip, so a card is exactly what they asked for. A flag about what the
+  // page shows on its own must not answer for what a person just did.
+  it("leaves the card the reader asked for alone", () => {
+    const at = host.indexOf("openTrade: (matched, side)")
+    const body = host.slice(at, at + 600)
+    expect(body).toContain("spotController = c")
+    expect(body).not.toContain("chipOwnsThePage")
+  })
+})
+
+// CORRECTED, and the assertion outlived the reason for it.
+//
+// This was written when a light page made the CHIP paint a ground: the
+// chip spans the post's text column, which is right on a feed and
+// invisible without a ground, and the moment it painted one that width
+// became a dark bar drawn across an article. The ground has since moved
+// off the chip and onto the individual keys (see xStrip's "WHEN THE PAGE
+// WILL NOT LEND A GROUND"), because the capsule it created wrapped the
+// price, Buy and Sell into one control on a row whose whole language is
+// separate keys.
+//
+// The hug stays, for the reason that was always underneath the first one:
+// a feed gives the chip a text column to belong to and an article does
+// not, so on an article it takes the width its keys occupy and leaves the
+// rest of the line to the page.
+describe("a chip on an article takes only its keys' width", () => {
+  it("hugs, so it never draws a bar across the line", () => {
+    const src = readFileSync(join(__dirname, "xStrip.ts"), "utf8")
+    expect(src).toContain(".chip.on-light { align-self: flex-start; width: fit-content")
   })
 })

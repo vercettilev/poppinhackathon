@@ -99,7 +99,7 @@ export type {
 } from './catalog/index';
 
 // ── balances ────────────────────────────────────────────────────────────────
-export { DecimalsCache } from './balance/decimals';
+export { DecimalsCache, MintProgramCache, TOKEN_2022_PROGRAM_ID } from './balance/decimals';
 export type { MintInfoReader } from './balance/decimals';
 export { TokenBalanceReader, toUiAmount } from './balance/token-balance';
 export type {

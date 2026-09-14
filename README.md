@@ -26,7 +26,7 @@ npm install
 npm test
 ```
 
-That runs 91 rules the recognition engine and the two site adapters are not allowed to break. These are the parts that stand alone: they take a page, or a string, and return an answer. The rest of the source is published to be read rather than executed, since the product it belongs to is not.
+That runs 102 rules the recognition engine, the three site adapters and the page-lightness measurement are not allowed to break. These are the parts that stand alone: they take a page, or a string, and return an answer. The rest of the source is published to be read rather than executed, since the product it belongs to is not.
 
 ## The hard part
 

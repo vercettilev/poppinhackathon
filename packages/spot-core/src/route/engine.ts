@@ -1,6 +1,6 @@
 import { RouteError } from '../errors';
 import type { Signer, SerializedTransaction } from '../signer/index';
-import { DecimalsCache } from '../balance/decimals';
+import { DecimalsCache, MintProgramCache } from '../balance/decimals';
 import type { MintPolicy } from './policy';
 import {
   type JupiterClient,
@@ -82,6 +82,15 @@ export interface RouteEngineDeps {
    */
   feeAccount?: string;
   /**
+   * Which token program owns a mint, so the buy path can tell whether
+   * Jupiter is able to pay our fee account at all.
+   *
+   * OPTIONAL. Without it the engine behaves exactly as it did before:
+   * every buy asks for the fee. See MintProgramCache for the measurement
+   * that made this necessary.
+   */
+  mintPrograms?: MintProgramCache;
+  /**
    * Network budget for a single READ. A retry that cannot finish inside it is
    * skipped rather than allowed to overrun — §9: render nothing rather than
    * arrive late.
@@ -130,6 +139,7 @@ export class RouteEngine {
   private readonly simulator: TransactionSimulator | undefined;
   private readonly requireAmountCheck: boolean;
   private readonly feeAccount: string | undefined;
+  private readonly mintPrograms: MintProgramCache | undefined;
   private readonly budgetMs: number;
   private readonly tradeBudgetMs: number;
 
@@ -146,11 +156,43 @@ export class RouteEngine {
     // decision, so a config that sets one and forgets the other is a
     // misconfiguration, not a mode.
     this.feeAccount = deps.feeAccount ?? this.fee.tokenAccount;
+    this.mintPrograms = deps.mintPrograms;
     this.budgetMs = deps.budgetMs ?? 3_000;
     // Clamped rather than trusted: a budget past the staleness ceiling buys
     // retries whose results are then refused as stale, which is a slower way
     // to fail than not retrying at all.
     this.tradeBudgetMs = Math.min(deps.tradeBudgetMs ?? 10_000, QUOTE_MAX_AGE_MS);
+  }
+
+  /**
+   * CAN JUPITER ACTUALLY PAY OUR FEE ACCOUNT FOR THIS BUY.
+   *
+   * Our fee account is a classic SPL account holding USDC, and Jupiter
+   * cannot reconcile it with a Token-2022 OUTPUT mint: its Route
+   * instruction throws IncorrectTokenProgramID, custom error 6014, and the
+   * swap refuses to exist. What is measured is the incompatibility itself,
+   * three times over with one variable (see MintProgramCache); the exact
+   * rule inside Jupiter that decides which side pays is NOT established
+   * here, and this comment deliberately does not guess at it.
+   *
+   * So a buy that cannot pay the fee does not ask for one. The trade is
+   * worth more than the cut, and the alternative on this catalog is every
+   * tokenized stock purchase failing. The proper fix is a fee account per
+   * output program; until that exists this is the honest fallback.
+   *
+   * Both halves move together and that is the point: platformFeeBps on the
+   * quote and feeAccount on the build have to agree, or the price a reader
+   * is shown is not the price they pay.
+   *
+   * Unknown counts as classic, which is what shipped before this existed.
+   */
+  private async buyFee(
+    outputMint: string,
+  ): Promise<{ bps: number | undefined; account: string | undefined }> {
+    const off = { bps: undefined, account: undefined };
+    if (!(this.fee.bps > 0) || !this.feeAccount) return off;
+    if (await this.mintPrograms?.isToken2022(outputMint)) return off;
+    return { bps: this.fee.bps, account: this.feeAccount };
   }
 
   /** Absolute deadline for the network calls of one engine call. */
@@ -179,6 +221,8 @@ export class RouteEngine {
       throw new RouteError('bad_input', 'amountUsd too small to route');
     }
 
+    const fee = await this.buyFee(outputMint);
+
     const [q, dec] = await Promise.all([
       this.jupiter.quote(
         {
@@ -188,8 +232,10 @@ export class RouteEngine {
           slippageBps: this.slippageBps,
           // The probe has to price what the BUY will do, fee included, or
           // the number a reader sees before tapping is not the number they
-          // get after.
-          platformFeeBps: this.fee.bps > 0 ? this.fee.bps : undefined,
+          // get after. Which is also why it asks buyFee() rather than the
+          // config: a buy that will not be charged must not be quoted as
+          // though it will.
+          platformFeeBps: fee.bps,
         },
         this.deadline(),
       ),
@@ -264,6 +310,7 @@ export class RouteEngine {
     }
 
     const userPublicKey = await signer.publicKey();
+    const fee = await this.buyFee(outputMint);
 
     const quotedAt = this.now();
     const deadline = { deadlineAt: quotedAt + this.tradeBudgetMs };
@@ -273,14 +320,14 @@ export class RouteEngine {
         outputMint,
         amount: String(grossRaw),
         slippageBps: this.slippageBps,
-        platformFeeBps: this.fee.bps > 0 ? this.fee.bps : undefined,
+        platformFeeBps: fee.bps,
       },
       deadline,
     );
 
     // Build against the SAME quote object Jupiter just returned.
     const transaction = await this.jupiter.buildSwap(
-      { quoteResponse: q, userPublicKey, feeAccount: this.feeAccount },
+      { quoteResponse: q, userPublicKey, feeAccount: fee.account },
       deadline,
     );
 
@@ -301,7 +348,7 @@ export class RouteEngine {
         inputMint: USDC_MINT,
         outputMint,
         amountInRaw: String(grossRaw),
-        feeAccount: this.feeAccount,
+        feeAccount: fee.account,
         // The floor, from the quote this transaction was built for. Without
         // it "did anything arrive" was the whole output test, and one base
         // unit is something.
@@ -330,8 +377,10 @@ export class RouteEngine {
      * Computed from the input it is both correct and exact, with no
      * dependence on which mint a quote chose to report in.
      */
-    const feeRaw =
-      this.fee.bps > 0 ? (grossRaw * BigInt(this.fee.bps)) / 10_000n : 0n;
+    /* AND IT REPORTS WHAT WAS ACTUALLY ASKED FOR. `fee.bps`, not the
+       config: a buy whose fee was skipped because the output is Token-2022
+       must report zero, or the ledger records a cut that was never taken. */
+    const feeRaw = fee.bps ? (grossRaw * BigInt(fee.bps)) / 10_000n : 0n;
 
     return {
       transaction,

@@ -13,11 +13,15 @@ import {
   JUICE_SELL_FILL,
   JUICE_SHEEN,
 } from "~/theme/juice"
+import { ensureBrandFont } from "~/helpers/brandFont"
+import { pageIsLight } from "~/helpers/pageIsLight"
 import { createScanTally } from "~/helpers/scanTally"
 import type { SiteAdapter } from "./siteAdapter"
+import { NEWS_SITE } from "./newsSite"
 import { REDDIT_SITE } from "./redditSite"
 import { X_SITE } from "./xSite"
 import { dbg } from "~/helpers/poppinDebug"
+import { failureReason } from "~/helpers/failureReason"
 import { drawLineFromLeft } from "~/helpers/lineDraw"
 import { priceText } from "~/helpers/priceText"
 import type { SeriesAnswer } from "~/services/SpotAssetService"
@@ -42,7 +46,12 @@ import {
   normalizeDecimal,
 } from "~/helpers/decimalInput"
 import { iconViaBackground } from "~/helpers/iconBridge"
-import { capIsMeaningful, compactCount, safetyLine } from "~/helpers/safetyLine"
+import {
+  capIsMeaningful,
+  compactCount,
+  safetyLine,
+  wrapsSomethingElse,
+} from "~/helpers/safetyLine"
 import type { MatchedAsset } from "~/services/SpotAssetService"
 import {
   pressKey,
@@ -619,6 +628,19 @@ export interface XStripDeps {
   now?(): number
   /** Test seam for "is this strip in the reader's screenful right now". */
   onScreen?(el: Element): boolean
+
+  /**
+   * CALLED THE FIRST TIME A CHIP LANDS ON THIS PAGE.
+   *
+   * Two Poppin surfaces at once is incoherent, and on a news article it
+   * was literally visible: a row under the headline and, at the same
+   * moment, the page card's tab on the right rail. The chip is the more
+   * specific answer — it is attached to the thing the reader just read —
+   * so it is the one that stays, and the page's general answer stands
+   * down. Once per page: a feed mounts dozens and the card only needs
+   * telling once.
+   */
+  onFirstChip?(): void
 }
 
 export interface XStripController {
@@ -1003,8 +1025,36 @@ export function createXStrip(deps: XStripDeps): XStripController {
     return p
   }
 
-  const stripOf = (cell: Element): HTMLElement | null =>
-    cell.querySelector<HTMLElement>("[data-poppin-strip]")
+  /**
+   * OUR STRIP FOR THIS CELL, WHEREVER THE ADAPTER PUT IT.
+   *
+   * On a feed the chip is mounted inside the post, so looking within the
+   * cell finds it. On an article the cell IS the headline and the chip is
+   * its next sibling, so the same lookup found nothing and every guard
+   * built on it read "no chip here" forever.
+   */
+  const stripOf = (cell: Element): HTMLElement | null => {
+    const inside = cell.querySelector<HTMLElement>("[data-poppin-strip]")
+    if (inside) return inside
+    const next = cell.nextElementSibling
+    return next?.matches("[data-poppin-strip]") ? (next as HTMLElement) : null
+  }
+
+  /**
+   * HOW OFTEN A CELL MAY BE REBUILT, and why there is a ceiling at all.
+   *
+   * CNBC server-renders and then hydrates, and React removes children of a
+   * container it manages that it did not put there — so the chip appeared
+   * under the headline and vanished a moment later. The cure is to notice
+   * and mount again, and the danger in that cure is a page whose framework
+   * removes it every time: two loops racing forever, on somebody else's
+   * site, with our name on it.
+   *
+   * Three tries. Enough for a hydration pass and a re-render after it, far
+   * short of a fight.
+   */
+  const REMOUNTS_ALLOWED = 3
+  const remounts = new Map<string, number>()
 
   /**
    * WHAT THE SCAN ACTUALLY SAW, for a reader with the console open.
@@ -1021,6 +1071,9 @@ export function createXStrip(deps: XStripDeps): XStripController {
    * timeline and re-serves the same handful of cells on every scroll, so a
    * line each would bury the console in seconds and tell the reader less.
    */
+  /** The page card is told once, on the first chip. See onFirstChip. */
+  let toldTheHost = false
+
   const sweep = {
     cells: 0,
     noArticle: 0,
@@ -1101,7 +1154,15 @@ export function createXStrip(deps: XStripDeps): XStripController {
      * buy-under-the-wrong-tweet. Same id, we are done here; different id,
      * everything below runs again from scratch.
      */
-    if (cell.getAttribute(ID_ATTR) === facts.id) return // seen, and still it
+    if (cell.getAttribute(ID_ATTR) === facts.id) {
+      // Seen, and still it — but a mark is not a chip. If the host took
+      // ours away, come back, a bounded number of times.
+      if (stripOf(cell)) return
+      const tried = remounts.get(facts.id) ?? 0
+      if (tried >= REMOUNTS_ALLOWED) return
+      remounts.set(facts.id, tried + 1)
+      dbg(`remounting ${facts.id}: the page removed the chip (${tried + 1})`)
+    }
 
     // A different tweet lives here now (or it is brand new). Old verdicts —
     // strip or silence — are about somebody else.
@@ -1298,6 +1359,9 @@ export function createXStrip(deps: XStripDeps): XStripController {
     const { row, tier } = match
     const host = document.createElement("div")
     host.setAttribute("data-poppin-strip", row.mint)
+    // Asked of the anchor, before the chip joins the tree: the page's own
+    // ground is the one thing the chip cannot read about itself.
+    const lightPage = pageIsLight(article)
     /**
      * NO `title` ON THE RESTING ROW — and this is a bug fix, not tidying.
      *
@@ -1452,6 +1516,129 @@ export function createXStrip(deps: XStripDeps): XStripController {
            3. MOTION WITH INTENT. One spring entrance, a 150ms crossfade
               between flow states, and a 96% press scale. Nothing loops,
               nothing bounces twice. */
+        /**
+         * WHEN THE PAGE WILL NOT LEND A GROUND, THE KEYS BRING THEIR OWN.
+         *
+         * The chip paints no background and writes in near-white ink,
+         * which is what makes it read as part of X or Reddit rather than
+         * a box dropped on them. On a white article that same drawing is
+         * a price nobody can read and buttons that look bleached —
+         * measured on CNBC.
+         *
+         * CORRECTED. The first cure gave the ground to the CHIP. It fixed
+         * the reading and it cost the structure: a filled capsule with a
+         * hairline and a drop, wrapped around the price, Buy and Sell
+         * together. Reported against the Reddit row side by side — there
+         * every key is its own shape and nothing contains them, which is
+         * the language this whole row is written in. A container says
+         * "one control". This row has four.
+         *
+         * So the ground moves to where the unreadability actually was.
+         * Not the chip: the WASHES. Every key here is a translucent wash
+         * over whatever sits behind it, and on white there is nothing
+         * behind it worth washing. Each key now carries its own floor,
+         * and carries it as its wash ALREADY COMPOSITED over JUICE.ground
+         * — so the pixels on CNBC are the pixels on Reddit, byte for
+         * byte. Nothing is filled that was not filled before; the ground
+         * travels with the key instead of being borrowed from a page that
+         * has none. That equality is the rule and not a coincidence:
+         * row-colour.spec recomputes all six values from the washes they
+         * stand for, so changing a wash names the hex that stopped
+         * matching.
+         *
+         * background-COLOR, not the shorthand, and not a style choice:
+         * .buy.holding paints the hold-to-buy sweep with background-image,
+         * and these selectors outrank it. The shorthand would reset that
+         * image to none and the sweep would simply never appear on a news
+         * page — a dead feature with nothing on screen to say so.
+         *
+         * :not(.open), because .chip.open grows a real JUICE.ground on
+         * every surface and the tail keys give theirs up to it (see "One
+         * surface at a time"). A floor under a key already standing on
+         * that surface is the nested ring that rule exists to remove.
+         *
+         * :not(.live), because an unread bell takes the accent as a whole
+         * button. These selectors carry four classes and .ring.live
+         * carries two, so without the exclusion the light-page floor wins
+         * and the one state the bell exists to show goes quiet.
+         */
+        .chip.on-light:not(.open) .lead,
+        .chip.on-light:not(.open) .ring:not(.live),
+        .chip.on-light:not(.open) .wal { background-color: #141E2D; }
+        .chip.on-light:not(.open) .ring:not(.live):hover,
+        .chip.on-light:not(.open) .wal:hover { background-color: #1D2B3F; }
+        .chip.on-light:not(.open) .buy { background-color: #14282A; }
+        .chip.on-light:not(.open) .buy:hover { background-color: #18342F; }
+        .chip.on-light:not(.open) .sell { background-color: #211C26; }
+        .chip.on-light:not(.open) .sell:hover { background-color: #30222B; }
+        /**
+         * AND THE SIGNATURE, WHICH IS INK AND NOT A KEY.
+         *
+         * Reported on CNBC: hovering opened a wide gap between Sell and the
+         * bell with nothing drawn in it. That gap was this wordmark. It is
+         * the one thing in the tail that is pure text, so when the ground
+         * moved off the chip and onto the keys it was the only child left
+         * without a floor, writing rgba(255,255,255,.52) onto white.
+         *
+         * It does not get a floor of its own. A signature in a pill is a
+         * badge, and this is meant to be the quietest thing on the row. It
+         * gets the same PRESENCE instead: on Reddit it composites to
+         * #8B8D8E for 5.68:1 against that page, and rgba(0,0,0,.6) on white
+         * is 5.74:1. The same voice at the same volume, on the other side
+         * of the paper.
+         */
+        .chip.on-light:not(.open) .pmark { color: rgba(0,0,0,.6); }
+        /**
+         * AND IT TAKES ONLY THE WIDTH ITS KEYS OCCUPY.
+         *
+         * On a feed the chip spans the post's whole text column, which is
+         * right there: it makes the row a deliberate part of the post
+         * rather than buttons orphaned mid-column. An article has no text
+         * column to belong to, the headline above IS the cell, so the chip
+         * stops where its last key does and leaves the rest of the line to
+         * the page.
+         *
+         * The row's own padding is deliberately NOT overridden here any
+         * more. It existed to keep the keys off the inside edge of the
+         * capsule this pass removed. With no capsule there is no edge, and
+         * 12px of it would only push the keys off the headline's left
+         * margin they now line up with. The open state's arithmetic
+         * (.chip.open .row and .chip.open .face, which pay each other
+         * back) is the feed's and needs no light-page copy either.
+         */
+        .chip.on-light { align-self: flex-start; width: fit-content; max-width: 100%; }
+        /**
+         * AND OPENING IT MUST NOT MAKE IT SMALLER.
+         *
+         * Reported: pressing Buy on an article narrows the chip. Measured
+         * in a 1100px column: 333px at rest, 370px with the tail revealed,
+         * 356px once the sheet is open. So the object shrank by 14px under
+         * the finger that pressed it, which is the opposite of what opening
+         * is supposed to mean.
+         *
+         * The cause is the hug above applying in both states. At rest the
+         * content is a row of keys; opened, those keys are replaced by the
+         * sheet, and the sheet is narrower. fit-content faithfully followed
+         * the content down.
+         *
+         * A floor alone would not be enough. The sheet's own max-content is
+         * 356px, so 356 is not a comfortable width it happens to have, it
+         * is the narrowest it can be — every child in there stretches, and
+         * what sets that number is the two segmented controls. Rendered at
+         * 480 and 520 the presets and the confirm stop being cramped.
+         *
+         * 520, then, with two jobs: comfortably above the 370px the row
+         * reaches at its widest, so pressing always grows; and capped, so
+         * the one state that DOES paint a ground never becomes a dark band
+         * drawn across an article. min() keeps it honest in a column
+         * narrower than the cap.
+         *
+         * A feed needs none of this. There the chip already spans the
+         * post's text column at rest, so opening changes its height and
+         * nothing else.
+         */
+        .chip.on-light.open { width: min(100%, 520px); }
+
         .chip {
           /* FULL WIDTH OF THE TWEET'S TEXT COLUMN, not content-hugging.
              As an inline pill it stopped wherever its last button happened
@@ -1688,7 +1875,17 @@ export function createXStrip(deps: XStripDeps): XStripController {
            the resting one. The seam only narrows while a chart or a sheet
            is open — the state where the reader is looking at that surface
            rather than scanning the row. */
-        .chip.open .end { padding-left: 6px; }
+        /* The seam used to give 4px back when the chip opened, which paid
+           half the open frame's inset. That payment made sense while .end
+           was right-aligned and its padding was the gap in front of a tail
+           pinned to the far edge. The cluster follows the price now, so
+           the only thing that payment buys is Buy and Sell sliding 4px
+           left the moment a reader opens the chart — movement on the two
+           controls that must never move. The face still pays its half; the
+           chip is 4px wider open than closed, and 4px on the right of a
+           left-anchored chip is nothing the old geometry was worried
+           about. */
+        .chip.open .end { padding-left: 10px; }
         .chip.closing { transition-duration: 0s; }
         .sheet {
           display: flex; flex-direction: column; gap: 11px;
@@ -1722,9 +1919,12 @@ export function createXStrip(deps: XStripDeps): XStripController {
            tap, always legible, never competing with the control that has a
            colour and moves the money. */
         .kind { display: flex; gap: 2px; flex-shrink: 0; }
+        /* Same reasoning as .segb: "When it hits" is a mode a reader can
+           take, not one the sheet has taken away. */
         .kindb {
           padding: 5px 9px; border-radius: 7px;
-          font-size: 11.5px; font-weight: 700; color: ${JUICE.text3};
+          font-size: 11.5px; font-weight: 700; color: ${JUICE.text2};
+          background: rgba(255,255,255,.045);
           letter-spacing: .02em;
         }
         .kindb:hover { color: ${JUICE.text2}; background: rgba(255,255,255,.05); }
@@ -1737,11 +1937,27 @@ export function createXStrip(deps: XStripDeps): XStripController {
           background: ${JUICE.well}; border-radius: 10px;
           box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
         }
+        /**
+         * AN UNCHOSEN OPTION IS NOT A DISABLED ONE.
+         *
+         * Both of these sat as the dimmest ink in the palette on no ground
+         * at all, beside a sibling wearing a full gradient. Reported from
+         * the field as "Sell looks switched off" — which is the correct
+         * reading of that drawing, and the wrong thing to tell a reader
+         * about a direction they can absolutely take.
+         *
+         * A ground rather than a hairline: the group already has a hairline
+         * of its own, and a second one inside it draws a table. This lifts
+         * the ink one step and gives the option something to sit on, which
+         * is the least a surface can do to say "you may press this". The
+         * chosen one keeps the fill, so the distinction is undamaged.
+         */
         .segb {
           flex: 1; padding: 6px 0; border-radius: 8px;
-          font-size: 12.5px; font-weight: 700; color: ${JUICE.text3};
+          font-size: 12.5px; font-weight: 700; color: ${JUICE.text2};
+          background: rgba(255,255,255,.045);
         }
-        .segb:hover { color: ${JUICE.text}; }
+        .segb:hover { color: ${JUICE.text}; background: rgba(255,255,255,.08); }
         /* THE ACTIVE DIRECTION IS FILLED, in its own color — the same
            gradient the confirm button wears, so the sheet reads as one
            statement from the tab to the money button. A grey "active"
@@ -2036,7 +2252,19 @@ export function createXStrip(deps: XStripDeps): XStripController {
          * that means a trade went through. Same edge and travel as every
          * other key in the product.
          */
-        .you-add {
+        /**
+         * .pick.you-add, NOT .you-add — the third time this file has been
+         * bitten by the same thing today.
+         *
+         * The button carries both classes, and .pick is declared LATER
+         * with a ground of its own. Equal specificity, so the later rule
+         * won and the money door rendered as a quiet outline among the
+         * quiet outlines, on the one screen where a short balance needs it
+         * to be unmissable. Specificity rather than reordering, because a
+         * rule that only works while it sits below another one is a trap
+         * set for whoever tidies this file next.
+         */
+        .pick.you-add {
           flex: 1; padding: 11px 0;
           background: ${JUICE_GRADIENT}; color: ${JUICE.onAccent};
           font-size: 14px; font-weight: 800;
@@ -2045,8 +2273,8 @@ export function createXStrip(deps: XStripDeps): XStripController {
           transition: transform .1s ease-out, box-shadow .1s ease-out,
                       filter .15s ease-out;
         }
-        .you-add:hover { filter: brightness(1.07); background: ${JUICE_GRADIENT}; }
-        .you-add:active {
+        .pick.you-add:hover { filter: brightness(1.07); background: ${JUICE_GRADIENT}; }
+        .pick.you-add:active {
           transform: translateY(2px);
           box-shadow: 0 0 0 #2E86C9, 0 2px 8px -8px rgba(104,198,255,.4);
         }
@@ -2991,8 +3219,159 @@ export function createXStrip(deps: XStripDeps): XStripController {
            needs to all 58. Every other state gains the same headroom.
            Change these and re-measure, or the ticker starts paying
            again. */
+        /**
+         * THE KEYS SIT WITH THE PRICE, NOT AT THE FAR EDGE.
+         *
+         * margin-left:auto threw the money to the right rail and left a
+         * long void across the middle of the row, so the chip read as two
+         * widgets sharing a line rather than one control. Measured against
+         * the host instead of against taste: Reddit packs its own vote,
+         * comment, repost and share cluster hard left, and this row was the
+         * only full-width thing on the post.
+         *
+         * So the cluster follows the pill. The chip becomes one object, it
+         * matches the rhythm of the furniture above it, and the reader's
+         * eye travels from the asset to its buttons without crossing empty
+         * space.
+         *
+         * The padding is untouched at 10px: the spec below records that
+         * these numbers were measured against a ~500px column after a
+         * field report clipped a ticker to "BU…", and that opening the
+         * chip must cost the row no width. Only the auto margin goes.
+         */
         .end { display: flex; align-items: center; gap: 7px;
-               margin-left: auto; padding-left: 10px; flex-shrink: 0; }
+               padding-left: 10px; flex-shrink: 0; }
+
+        /**
+         * WHO PUT THIS HERE.
+         *
+         * Field note from Reddit: the resting chip carried the company's
+         * logo, the host's accent colour and the word "Buy", and nothing
+         * anywhere said Poppin. On a page about money an unattributed Buy
+         * button is indistinguishable from something malicious, and asking
+         * a reader to trust it was asking for something we had not earned.
+         *
+         * It goes at the LEFT EDGE OF THE MONEY, not beside the price:
+         * the price already wears the asset's own logo, and two marks a
+         * few pixels apart read as a collision.
+         *
+         * AND IT IS A WORD, NOT A GLYPH. The first attempt put the logo
+         * here at 13px and it simply became a sixth icon in a row of
+         * icons — the eye counted a control it could not name, which is
+         * the opposite of what a signature is for. Type cannot be mistaken
+         * for a button. It carries more air than the icon gap so the eye
+         * reads it as a label on the group rather than a member of it.
+         *
+         * AND IT RESTS HIDDEN, with the two doors. A signature under every
+         * post in a feed is the same mistake as a control under every
+         * post: repeated often enough it stops being information and
+         * becomes furniture, and this file's own rule is that a thing
+         * which appears everywhere is wallpaper. It arrives with the
+         * pointer, which is the moment a reader is asking what this is.
+         *
+         * The order property rather than DOM position, so the stagger's
+         * nth-child delays keep pointing at the controls they were tuned
+         * for.
+         */
+        .pmark {
+          margin-right: 0;
+          /* OUR TYPE, AND THE ONLY PLACE IT BELONGS. The chip's body
+             deliberately borrows the host's face so the row looks native;
+             a signature set in the host's font is not a signature at all,
+             which is what the first version was — Poppin written in
+             TwitterChirp. This is the brand face, lowercase, as drawn. */
+          font: 700 11px/1 PoppinSans, -apple-system, "Segoe UI", Roboto, sans-serif;
+          letter-spacing: -.01em;
+          color: rgba(255,255,255,.52);
+          white-space: nowrap;
+          flex-shrink: 0;
+          opacity: 0;
+          transition: opacity ${JUICE.motionMs}ms ${JUICE.motionEase};
+        }
+
+        /**
+         * THE TWO DOORS REST CLOSED.
+         *
+         * Bell and wallet are secondary and permanent: they cost a reader
+         * attention on every chip on the page, and both are reachable one
+         * press away — the sheet's own "When it hits" IS the alert, in
+         * words. Five controls on a resting row, three of them unlabelled
+         * glyphs, is a toolbar rather than an offer.
+         *
+         * They keep their space so the row cannot reflow under the
+         * pointer, and they return for hover, for keyboard focus, and
+         * whenever the wallet has something to say — a dot nobody can see
+         * is not a notification.
+         */
+        /**
+         * THE SECONDARY CONTROLS TAKE NO ROOM UNTIL THEY ARE WANTED.
+         *
+         * .ring is the bell and .wal is the wallet. Named explicitly
+         * because the first version of this rule targeted .bell, which
+         * reads like the bell and is applied to nothing.
+         *
+         * They used to rest invisible but KEEP their width, so the row
+         * could not reflow under the pointer. That bought stillness at the
+         * price of a permanent void between the price and the keys, and
+         * the keys are the reason the row exists. They collapse now, so at
+         * rest the money sits against the asset it belongs to.
+         *
+         * The negative margin cancels this flex row's own gap, which is
+         * inserted between items whatever their width — three collapsed
+         * controls would otherwise still hold 21px open.
+         *
+         * On the way in they are staggered: the signature, then the bell,
+         * then the wallet. A stagger is what turns a reflow from a jolt
+         * into a gesture, and the order is deliberate — identity answers
+         * first, because the question a hovering reader is asking is what
+         * this thing is. On the way out they leave together; nobody
+         * choreographs a departure they are already looking away from.
+         */
+        .pmark, .ring, .wal {
+          /* AFTER the keys, on all three. Opening between the price and Buy
+             moved the primary action ~115px to the right exactly as a
+             reader was travelling towards it: the button ran away from the
+             pointer reaching for it. Growing rightward into empty column
+             costs nobody anything. Declared here rather than on .pmark
+             alone, which is where it first landed — the signature moved
+             and the two doors stayed, so the keys still walked. */
+          order: 1;
+          opacity: 0;
+          max-width: 0;
+          margin-left: -7px;
+          overflow: hidden;
+          pointer-events: none;
+          transition: opacity ${JUICE.motionMs}ms ${JUICE.motionEase},
+                      max-width ${JUICE.motionMs}ms ${JUICE.motionEase},
+                      margin-left ${JUICE.motionMs}ms ${JUICE.motionEase};
+        }
+        .pmark { margin-right: 0; }
+        .chip:hover .pmark, .chip:focus-within .pmark,
+        .chip:hover .ring, .chip:focus-within .ring,
+        .chip:hover .wal, .chip:focus-within .wal,
+        .ring:focus-visible, .wal:focus-visible,
+        /* Both the bell and the wallet mark unread with .wal-dot, so one
+           selector covers the pair. This is the case that must not wait
+           for a pointer: a notification nobody can see is not a
+           notification, so the control holds its ground and its width
+           whether or not anyone is hovering. */
+        .ring:has(.wal-dot:not([hidden])),
+        .wal:has(.wal-dot:not([hidden])) {
+          opacity: 1;
+          max-width: 60px;
+          margin-left: 0;
+          pointer-events: auto;
+        }
+        .chip:hover .pmark, .chip:focus-within .pmark { margin-left: 4px; }
+        .chip:hover .pmark, .chip:focus-within .pmark { transition-delay: 0ms; }
+        .chip:hover .ring, .chip:focus-within .ring { transition-delay: 55ms; }
+        .chip:hover .wal, .chip:focus-within .wal { transition-delay: 110ms; }
+        @media (prefers-reduced-motion: reduce) {
+          .pmark, .ring, .wal { transition: none; }
+          .chip:hover .pmark, .chip:hover .ring, .chip:hover .wal,
+          .chip:focus-within .pmark, .chip:focus-within .ring,
+          .chip:focus-within .wal { transition-delay: 0ms; }
+        }
         /**
          * PRESS AND HOVER COMPOSE, THEY DO NOT FIGHT.
          *
@@ -3070,15 +3449,37 @@ export function createXStrip(deps: XStripDeps): XStripController {
            Sell becomes a neutral outline for the same reason. Not quieter
            because selling matters less, quieter because only one thing per
            row can be the primary door. */
+        /**
+         * FILL MEANS COMMITMENT. HUE MEANS DIRECTION.
+         *
+         * Replaces the older rule that kept direction colour off these keys
+         * entirely. That rule was solving a real problem the wrong way
+         * round: it made HUE carry "is this a fact or a control", which is
+         * not a thing hue is good at, and it left the one control that
+         * moves money wearing a filled brand blue — the same blue as
+         * Reddit's Join and X's Follow, on the two surfaces this chip lives
+         * on. The key read as a feature of whichever page it landed on.
+         *
+         * Two channels now, each carrying exactly one meaning. FILL says
+         * something has been chosen: nothing on the resting row is filled,
+         * because nothing is committed, and the fill arrives with the
+         * decision in the sheet. HUE says which way, which is the language
+         * every trading surface already speaks and belongs to no host.
+         *
+         * What the old rule was protecting survives intact: the sheet's
+         * confirm still owns the only filled direction on the surface, so
+         * it still marks the moment rather than decorating it.
+         */
         .buy, .go {
-          background: ${JUICE_GRADIENT};
+          background: rgba(74,222,128,.10);
+
           /* X'S BUTTON, OUR PHYSICS. 12/20 padding at 800 weight built a
              44px key under a 15px tweet. X's own Follow and Post buttons
              are ~32px with 14px bold type, and matching them is what makes
              a filled green button read as part of the page rather than as
              an advert dropped into it. The edge and the travel survive the
              shrink; they were never the loud part. */
-          color: ${JUICE.onAccent}; padding: 7px 15px; font-size: 14px; font-weight: 700;
+          color: ${JUICE.buyFillHi}; padding: 7px 15px; font-size: 14px; font-weight: 700;
           /* THE KEY OWNS ITS OWN HEIGHT. "button { font: inherit }" above
              takes the line-height with the font, and nothing in this sheet
              — not :host, not .chip, not button — ever declares one, so it
@@ -3098,7 +3499,14 @@ export function createXStrip(deps: XStripDeps): XStripController {
              surface. A wide bright halo is what makes a timeline feel like
              a casino, and this row is passed on every scroll — so the
              bloom is tight and dim, and the fun lives in the travel. */
-          box-shadow: 0 2px 0 #2E86C9, 0 4px 10px -7px rgba(104,198,255,.4);
+          /* ONE declaration, because box-shadow does not merge: a second
+             one later in the rule replaces the first outright, which is
+             how the hairline vanished and a blue edge survived under a
+             green key. The edge carries the direction too — it is the
+             most visible millimetre of the control. */
+          box-shadow: inset 0 0 0 1px rgba(74,222,128,.42),
+                      0 2px 0 #148A45,
+                      0 4px 10px -7px rgba(74,222,128,.4);
           transform: translateY(0);
           transition: transform .1s ease-out, box-shadow .1s ease-out,
                       filter .15s ease-out;
@@ -3128,7 +3536,13 @@ export function createXStrip(deps: XStripDeps): XStripController {
            under, so the finger gets the same answer a real switch gives. */
         .buy:active, .go:active {
           transform: translateY(2px);
-          box-shadow: 0 0 0 #2E86C9, 0 2px 7px -8px rgba(104,198,255,.35);
+          /* Pressed: the edge collapses and the key sits down. Green,
+             like the edge it is collapsing — this is the state a
+             screenshot never shows, which is why the old rule was broken
+             here twice. */
+          box-shadow: inset 0 0 0 1px rgba(74,222,128,.42),
+                      0 0 0 #148A45,
+                      0 2px 7px -8px rgba(74,222,128,.35);
         }
         /* SAME BUG THE SELL KEY HAD, and worth naming because it is the
            shape of every colour change in a long stylesheet: this rule
@@ -3139,7 +3553,10 @@ export function createXStrip(deps: XStripDeps): XStripController {
 
            A filled key does not need a different colour on aim; it needs
            to look lit. */
-        .buy:hover, .go:hover { filter: brightness(1.07); }
+        /* Brightness on a wash, never a new ground: this is the exact line
+           where the old rule was broken twice, because a later rule wins
+           the cascade and a screenshot has no pointer. */
+        .buy:hover, .go:hover { background: rgba(74,222,128,.16); }
         /* Sell carries its meaning AT REST, quietly. It used to be neutral
            grey until hovered, which made the pair read as one real control
            and one afterthought — and on a row about money the two directions
@@ -3166,8 +3583,9 @@ export function createXStrip(deps: XStripDeps): XStripController {
            ground and coloured ink it has always had; what it gains is the
            edge and the travel, so it is obviously a key without being a
            second traffic light. */
+        /* Ink and a hairline, no fill. See .buy above for why. */
         .sell {
-          color: ${JUICE.text};
+          color: ${JUICE.sellInk};
           padding: 7px 15px; font-size: 14px; font-weight: 700;
           /* Same seat, same padding, and now the same locked line box —
              see .buy. Declared here rather than as a shared .buy, .sell
@@ -3175,18 +3593,22 @@ export function createXStrip(deps: XStripDeps): XStripController {
              shape theme/no-dead-rules.spec.ts exists to catch. */
           line-height: 16px;
           letter-spacing: -.01em;
-          background: rgba(255,255,255,.05);
-          box-shadow: 0 2px 0 rgba(255,255,255,.09),
-                      inset 0 1px 0 rgba(255,255,255,.07),
-                      inset 0 0 0 1px rgba(255,255,255,.16);
+          background: rgba(255,122,112,.08);
+          /* The edge carries the direction here too: it is the most
+             visible millimetre of the control, and a white one under a red
+             key reads as a leftover. */
+          box-shadow: inset 0 0 0 1px rgba(255,122,112,.34),
+                      inset 0 1px 0 rgba(255,255,255,.05),
+                      0 2px 0 #A52019;
           transform: translateY(0);
           transition: transform .1s ease-out, box-shadow .1s ease-out,
                       background-color .15s ease-out;
         }
-        .sell:hover { background: rgba(255,255,255,.09); }
+        .sell:hover { background: rgba(255,122,112,.14); }
         .sell:active {
           transform: translateY(2px);
-          box-shadow: 0 0 0 rgba(255,255,255,.09),
+          box-shadow: inset 0 0 0 1px rgba(255,122,112,.34),
+                      0 0 0 #A52019,
                       inset 0 1px 0 rgba(255,255,255,.07),
                       inset 0 0 0 1px rgba(255,255,255,.16);
         }
@@ -4039,6 +4461,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
     const end = shadow.querySelector<HTMLElement>(".end")!
     /** The whole object, which the order sheet opens. */
     const chip = shadow.querySelector<HTMLElement>(".chip")!
+    if (lightPage) chip.classList.add("on-light")
     /** Swap the tail with a breath instead of a blink. */
     /**
      * THE MONEY, WHICH IS THE USDC. This used to be
@@ -4260,6 +4683,17 @@ export function createXStrip(deps: XStripDeps): XStripController {
      * ours-origin road the book's rows and the chip's own badge take, so
      * one coin looks like itself everywhere on this surface.
      */
+    /**
+     * ONE TICKER LANGUAGE ON THIS SURFACE.
+     *
+     * The holdings list read "$WIF" beside "SOL", "RAY" and "ORE" in the
+     * same column, because the sigil is the server's and some rows carry
+     * it. The chip's own pill says NVDA and the fills row already stripped
+     * it, so bare is what this surface speaks; holdings was the one place
+     * that had not been told.
+     */
+    const bareTicker = (t: string) => t.replace(/^\$/, "")
+
     const coinDisc = (mint: string, ticker: string) => {
       const disc = document.createElement("span")
       disc.className = "you-ico"
@@ -4387,7 +4821,19 @@ export function createXStrip(deps: XStripDeps): XStripController {
       panel.appendChild(head)
       void Promise.resolve(deps.myRank?.()).then((r) => {
         if (!host.isConnected || !r || r.rank === null) return
-        rank.textContent = `#${r.rank} this week`
+        /**
+         * NAME WHAT IT RANKS.
+         *
+         * This is the flywheel board, sorted by POINTS, and it said only
+         * "#1 this week" — two lines under "Portfolio value $9.05". A
+         * reader joins those: nine dollars and first place, and either the
+         * number or the board is a lie. Neither is. The rank was borrowing
+         * credibility from a figure it has nothing to do with, and paying
+         * for it with the figure's own.
+         *
+         * Four words fix it, because the problem was never the rank.
+         */
+        rank.textContent = `#${r.rank} by points this week`
         rank.hidden = false
       })
 
@@ -4528,10 +4974,52 @@ export function createXStrip(deps: XStripDeps): XStripController {
         cascadedTab = tab
         list.replaceChildren()
         if (tab === "holdings") {
-          const rows = rankPositions(
+          /**
+           * USDC IS A HOLDING, and leaving it out made the headline look
+           * wrong. The hero said $9.05 and the list under it showed
+           * nothing that added up to it — the cash was named once, in a
+           * small line beside the total, and then absent from the only
+           * place a reader goes to ask what they own.
+           *
+           * The server sends cash and positions separately because they
+           * are fetched differently, which is a fact about our plumbing
+           * and not about the reader's wallet. To them it is one pile.
+           */
+          const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+          const cashRow =
+            b && b.cashUsd > 0 && !(b.positions ?? []).some((p) => p.mint === USDC_MINT)
+              ? [
+                  {
+                    mint: USDC_MINT,
+                    ticker: "USDC",
+                    named: true,
+                    uiAmount: b.cashUsd,
+                    priceUsd: 1 as number | null,
+                    valueUsd: b.cashUsd as number | null,
+                    avgEntryPriceUsd: null as number | null,
+                    // Cash has no gain to show: a dollar was always a
+                    // dollar, and a "+$0.00" beside it would be noise
+                    // pretending to be information.
+                    pnlUsd: null as number | null,
+                  },
+                ]
+              : []
+          const rows = rankPositions(cashRow.concat(
             (b?.positions ?? []).map((p) => ({
               mint: p.mint,
               ticker: p.ticker ?? `${p.mint.slice(0, 4)}…`,
+              /**
+               * Kept so the fold below can tell "we could not name this"
+               * from "it is called SOL and it is worth nothing".
+               *
+               * AN ADDRESS IS NOT A NAME. Three prediction-era holdings
+               * survived the first fold because the server does send them
+               * a ticker — and that ticker is the head of their own mint.
+               * A row reading "6gS3…" with a quantity and an em dash tells
+               * a reader nothing they can act on, whether the truncation
+               * happened here or upstream.
+               */
+              named: Boolean(p.ticker) && !p.mint.startsWith((p.ticker ?? "").replace(/…$/, "")),
               uiAmount: p.uiAmount,
               priceUsd: p.priceUsd ?? null,
               valueUsd: p.valueUsd ?? null,
@@ -4544,14 +5032,84 @@ export function createXStrip(deps: XStripDeps): XStripController {
               // server's figure is the fallback.
               pnlUsd: p.unrealizedPnlUsd ?? p.pnlUsd ?? null,
             })),
+            ),
+            // Ranked WITH the cash rather than after it. Appending put the
+            // largest holding on the wallet at the bottom of a list sorted
+            // by size, under things worth nothing.
           ).filter((p) => p.uiAmount > 0)
-          if (rows.length === 0) {
+
+          /**
+           * DUST IS FOLDED, NOT LISTED.
+           *
+           * The filter above asks whether a position exists, and a wallet
+           * that has traded for a while says yes to a great many things
+           * worth nothing at all. Measured on a real reader: six rows, six
+           * of them reading "$0.00", under a portfolio line reading $9.05
+           * that was almost entirely the USDC. The list was answering a
+           * question nobody asked and burying the one holding that had a
+           * number.
+           *
+           * Worse than noise, one of those rows read "$0.00  −$4.90": a
+           * loss on a position worth nothing is a true figure that stops a
+           * reader cold, and it stopped this one.
+           *
+           * Folded rather than hidden. The count is named, so nothing is
+           * concealed — a reader who wants the tail knows it is there, and
+           * the panel still lists every one of them.
+           */
+          /**
+           * A holding is worth showing when it has a name or a value. Both
+           * missing means there is nothing on the row: a truncated base58
+           * address, a bare quantity, and an em dash where the money goes.
+           *
+           * Measured on a real wallet: three of those. They were first
+           * assumed to be leftovers from the prediction stack this product
+           * was before August, and reading the chain said otherwise —
+           * Token-2022 mints issued by DFlow, whose metadata points at
+           * c.dflow.net, bought deliberately as prediction outcomes. The
+           * fold is right either way and the reason is the same: Jupiter
+           * answers TOKEN_NOT_TRADABLE for them, so there is no price to
+           * show and no swap to offer.
+           *
+           * They are not dust — dust at least has a price — and the
+           * earlier fold let them through on purpose, because "unpriced"
+           * was being read as "we do not know yet". For a row that is also
+           * nameless there is nothing to know and nothing to say. Their
+           * real home is the venue that issued them.
+           */
+          const DUST_USD = 0.01
+          /**
+           * UNPRICED IS NOT WORTHLESS. A null value means nobody could
+           * price the thing, and folding those away would answer "we do
+           * not know" with "it is nothing" — the row below prints an em
+           * dash for exactly this case, and a spec holds it there.
+           */
+          const isDust = (v: number | null) => v !== null && v < DUST_USD
+          const showable = (p: { valueUsd: number | null; named: boolean }) =>
+            !isDust(p.valueUsd ?? null) && (p.named || p.valueUsd !== null)
+          const dust = rows.filter((p) => !showable(p))
+          const held = rows.filter(showable)
+
+          if (held.length === 0 && dust.length === 0) {
             list.appendChild(empty("Nothing held yet."))
             return
           }
-          for (const p of rows) {
+          if (held.length === 0) {
+            list.appendChild(
+              empty(
+                `${dust.length} position${dust.length === 1 ? "" : "s"} with nothing to show.`,
+              ),
+            )
+            return
+          }
+          for (const p of held) {
             const r = document.createElement("div")
-            r.className = "you-row"
+            // The cash row is marked: it is a holding, but it is not a
+            // position, and the things this list offers a position — a
+            // flex, a gain — mean nothing for a dollar. A spec was already
+            // written expecting this class before there was a row to wear
+            // it.
+            r.className = p.mint === USDC_MINT ? "you-row cash" : "you-row"
             /**
              * THE COIN'S OWN FACE. The book was a column of tickers — a
              * ledger's way of listing assets, and the one place on this
@@ -4561,7 +5119,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
              */
             r.append(
               coinDisc(p.mint, p.ticker),
-              cell("you-tick", p.ticker),
+              cell("you-tick", bareTicker(p.ticker)),
               cell("you-qty", qtyText(p.uiAmount)),
               // "—", never "$0.00": a holding the server could not price is
               // unpriced, and zero is a different claim entirely.
@@ -4641,6 +5199,14 @@ export function createXStrip(deps: XStripDeps): XStripController {
             doorTo(r, `/token/${p.mint}`)
             list.appendChild(r)
           }
+          if (dust.length > 0) {
+            // Named, so the fold is visible rather than a disappearance.
+            list.appendChild(
+              empty(
+                `+ ${dust.length} position${dust.length === 1 ? "" : "s"} with nothing to show`,
+              ),
+            )
+          }
           return
         }
         if (tab === "alerts") {
@@ -4653,9 +5219,35 @@ export function createXStrip(deps: XStripDeps): XStripController {
            * recent notifications underneath. Setting one is the sheet's
            * bell, beside the price it is about.
            */
+          /**
+           * THIS TAB IS ABOUT THE READER'S MONEY.
+           *
+           * Measured on a real reader: the whole tab read "lev3 followed
+           * you", "nic liked your post", "nic liked your post" — dated 23
+           * and 74 days ago, inside a chip sitting under a post about
+           * Nvidia. Nothing on the surface was about a trade, and a
+           * two-month-old like is not activity, it is archaeology.
+           *
+           * A DENY LIST, not an allow list. Follows, likes and shares are
+           * the old product and belong in the panel, which is the app.
+           * Everything else passes — replies and mentions are usually
+           * conversation about something the reader traded, and a kind
+           * this file has never heard of is far likelier to be a new money
+           * event than a new way of being liked.
+           *
+           * And a horizon. Alerts and fills are recent by nature; a
+           * notification is not, and one from two months ago says nothing
+           * about what is happening now.
+           */
+          const SOCIAL_ONLY = new Set(["follow", "like", "share"])
+          const NOTE_HORIZON_MS = 14 * 24 * 60 * 60 * 1000
           const rows = lastAlerts ?? []
           const fired = lastFired ?? []
-          const notes = lastNotes ?? []
+          const notes = (lastNotes ?? []).filter((n) => {
+            if (SOCIAL_ONLY.has(n.kind)) return false
+            const at = Date.parse(n.created_at)
+            return !Number.isFinite(at) || Date.now() - at < NOTE_HORIZON_MS
+          })
           const fills = lastFills ?? []
           if (
             rows.length === 0 &&
@@ -4663,7 +5255,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
             fills.length === 0 &&
             notes.length === 0
           ) {
-            list.appendChild(empty("Nothing yet. Alerts and replies land here."))
+            list.appendChild(empty("Nothing yet. Fills and alerts land here."))
             return
           }
           /**
@@ -4696,7 +5288,9 @@ export function createXStrip(deps: XStripDeps): XStripController {
             doorTo(r, `/token/${f.mint}`)
             void enrich(f.mint).then((m) => {
               if (!line.isConnected) return
-              if (typeof m?.mcap === "number" && m.mcap > 0) {
+              // Not for a wrapped asset: the figure is the wrapper's, and
+              // "bought Apple at $51M MC" is a sentence about nothing.
+              if (typeof m?.mcap === "number" && m.mcap > 0 && capIsMeaningful(m?.issuer)) {
                 line.textContent = `${
                   f.side === "buy" ? "bought" : "sold"
                 } at ${compactUsd(m.mcap)} MC`
@@ -4711,7 +5305,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
             r.className = "you-row you-fired"
             r.append(
               actIcon(BELL_GLYPH, f.direction === "above" ? "up" : "down"),
-              cell("you-tick", f.symbol ?? `${f.mint.slice(0, 4)}…`),
+              cell("you-tick", bareTicker(f.symbol ?? `${f.mint.slice(0, 4)}…`)),
               cell("you-val", `hit ${priceText(f.atUsd)}`),
               cell("you-when", ago(new Date(f.firedAt).toISOString())),
             )
@@ -4728,7 +5322,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
                 `you-side you-dir-${a.direction}`,
                 a.direction === "above" ? "Above" : "Below",
               ),
-              cell("you-tick", a.symbol ?? `${a.mint.slice(0, 4)}…`),
+              cell("you-tick", bareTicker(a.symbol ?? `${a.mint.slice(0, 4)}…`)),
               cell("you-val", `@ ${priceText(a.targetUsd)}`),
               distCell(a.targetUsd, a.mint),
             )
@@ -4812,22 +5406,93 @@ export function createXStrip(deps: XStripDeps): XStripController {
             distCell(o.triggerPriceUsd, o.mint),
           )
           if (deps.cancelOrder) {
-            r.appendChild(
-              btn("you-x", "Cancel", () => {
-                if (halt()) return
-                void Promise.resolve(deps.cancelOrder?.(o.orderKey)).then(() => {
+            /**
+             * A CANCEL THAT FAILS HAS TO SAY SO.
+             *
+             * Reported as "order cancel edilmiyor", and the press really did
+             * nothing: the request reached the server, the server refused it,
+             * and the refusal arrived here as a rejected promise that this
+             * handler had no catch for. Seven presses, seven refusals, an
+             * unchanged row and not one word on screen — the reader's only
+             * evidence that a control exists is that it does something.
+             *
+             * The server's 422 carries Jupiter's own sentence, which is
+             * written for a reader ("Order size must be at least 5 USD" is
+             * the house example), so it is shown rather than flattened into
+             * "something went wrong".
+             */
+            const x = btn("you-x", "Cancel", () => {
+              if (halt()) return
+              x.disabled = true
+              x.textContent = "Cancelling…"
+              /**
+               * AND IT CANNOT SIT THERE FOREVER.
+               *
+               * The request leaves through the background, and a bridge
+               * that never answers leaves a disabled button reading
+               * "Cancelling…" for the life of the page. A control that can
+               * enter a state it cannot leave is a trap, whatever the
+               * reason it got stuck. Longer than the server's own 20s
+               * Jupiter timeout on purpose, so a slow answer still wins the
+               * race and this only fires when nothing is coming.
+               */
+              let settled = false
+              window.setTimeout(() => {
+                if (settled || !panel.isConnected) return
+                settled = true
+                x.disabled = false
+                x.textContent = "Cancel"
+                r.appendChild(note("err", "No answer — try again"))
+              }, 25_000)
+              void Promise.resolve(deps.cancelOrder?.(o.orderKey))
+                .then(() => {
+                  settled = true
                   // In place, exactly as Remove-alert next door: showYou()
                   // rebuilt the whole panel, reset the tab to Holdings and
                   // replayed the hero's drumroll - the reader cancelling
                   // their third order was teleported home three times.
                   if (!panel.isConnected) return
                   lastOrders = (lastOrders ?? []).filter(
-                    (x) => x.orderKey !== o.orderKey,
+                    (y) => y.orderKey !== o.orderKey,
                   )
                   paintList(lastBook, lastOrders)
+                  /**
+                   * AND THE MONEY COMES BACK, so the panel says so.
+                   *
+                   * A standing buy holds its USDC in escrow, and the
+                   * balance above counts only what is spendable — which is
+                   * correct while the order stands and wrong the instant it
+                   * is cancelled. Reported: cancel a $5 order against a
+                   * $9 balance and the hero stayed at $4.
+                   *
+                   * The server confirms the cancel on chain before it
+                   * answers, so by the time this runs the escrow is already
+                   * back in the wallet and one fresh read is enough. No
+                   * poll, no retry: unlike the order list, this source is
+                   * not eventually consistent, it is just unread.
+                   *
+                   * landBook, NOT showYou. Rebuilding the panel is what the
+                   * in-place patch above exists to avoid — it would reset
+                   * the tab to Holdings and teleport a reader who is still
+                   * looking at their orders.
+                   */
+                  void book().then((b) => landBook(b, true))
                 })
-              }),
-            )
+                .catch((err: unknown) => {
+                  settled = true
+                  const why = failureReason(err)
+                  dbg(`cancel refused for ${o.orderKey}: ${why}`)
+                  if (!panel.isConnected) return
+                  // The order is still theirs and still standing, so the
+                  // button goes back to being a button.
+                  x.disabled = false
+                  x.textContent = "Cancel"
+                  const said = r.querySelector(".note")
+                  if (said) said.remove()
+                  r.appendChild(note("err", why.slice(0, 140)))
+                })
+            })
+            r.appendChild(x)
           }
           list.appendChild(r)
         }
@@ -4842,6 +5507,10 @@ export function createXStrip(deps: XStripDeps): XStripController {
             el.setAttribute("aria-pressed", String(el === t))
           }
           paintList(lastBook, lastOrders)
+          // AND ASK AGAIN, because the answer may have changed since the
+          // panel opened. See loadOrders: this list is the one thing here
+          // whose source is eventually consistent.
+          if (key === "orders") loadOrders()
         })
         t.setAttribute("aria-pressed", String(tab === key))
         return t
@@ -4969,13 +5638,54 @@ export function createXStrip(deps: XStripDeps): XStripController {
         freshLanded = true
         landBook(b, true)
       })
-      void Promise.resolve(deps.listOrders?.()).then((o) => {
-        if (!panel.isConnected) return
-        lastOrders = o ?? []
-        // Every open order, not just this tweet's asset. The panel is about
-        // the reader, and an order on another mint is still theirs.
-        if (tab === "orders") paintList(lastBook, lastOrders)
-      })
+      /**
+       * ORDERS ARE ASKED FOR MORE THAN ONCE, and that is not belt and braces.
+       *
+       * Reported: place a standing order, open this panel, and it is not
+       * there until the page is reloaded. Nothing was cached and nothing
+       * failed. The list simply came from a source that had not caught up
+       * yet: /embed/asset/orders reads Jupiter's getTriggerOrders, which
+       * indexes the order account AFTER the transaction lands. Measured on
+       * the reported order — placed, and visible at Jupiter at 09:09:04.
+       *
+       * A list fetched exactly once, from an eventually consistent source,
+       * immediately after the event that changes it, is guaranteed to be
+       * wrong some of the time and has no way back. Reloading the page was
+       * the only cure because that is what mounted a new chip.
+       *
+       * So it is asked on open, again when the reader opens the tab, and
+       * once more a beat later if the tab is open and still empty. BOUNDED
+       * AT ONE RETRY on purpose: an empty order list is a perfectly normal
+       * answer, and a panel that polls forever to disbelieve it is the
+       * flicker amplifier the chip's remount cure was written against.
+       *
+       * A failure leaves the last known list alone rather than blanking it,
+       * and never throws: this used to have no catch at all, so one refused
+       * request left the tab empty for the life of the page with nothing on
+       * screen to say why.
+       */
+      let orderRetryLeft = 1
+      const loadOrders = () => {
+        void Promise.resolve(deps.listOrders?.())
+          .then((o) => {
+            if (!panel.isConnected) return
+            // Every open order, not just this tweet's asset. The panel is
+            // about the reader, and an order on another mint is still theirs.
+            lastOrders = o ?? []
+            if (tab === "orders") paintList(lastBook, lastOrders)
+            if (tab === "orders" && lastOrders.length === 0 && orderRetryLeft > 0) {
+              orderRetryLeft -= 1
+              setTimeout(() => {
+                if (panel.isConnected && tab === "orders") loadOrders()
+              }, 2_500)
+            }
+          })
+          .catch(() => {
+            // Keep whatever was last known. Nothing to say to the reader:
+            // they asked for a panel, not for a report on our network.
+          })
+      }
+      loadOrders()
     }
     /**
      * THE PILL CARRIES THE NEWS COUNT. An alert that fires while the
@@ -5058,6 +5768,27 @@ export function createXStrip(deps: XStripDeps): XStripController {
      * always opens Activity directly. The pill goes back to being purely
      * the portfolio's door.
      */
+    /**
+     * The signature. See .pmark for why it sits here and not by the price.
+     * Not a button: pressing it would be a fifth control on a row the whole
+     * point of this change is to quieten, and the sidebar is already one
+     * press away on the face.
+     */
+    const poppinMark = (): HTMLElement => {
+      // The brand face is registered on the DOCUMENT, which is what lets a
+      // shadow root reach it at all. Asking here rather than at boot keeps
+      // a page with nothing tradeable on it from fetching a font.
+      ensureBrandFont()
+      const m = document.createElement("span")
+      m.className = "pmark"
+      m.textContent = "poppin"
+      m.setAttribute("role", "img")
+      // No title: the resting row forbids native tooltips, and a screen
+      // reader has the label above. See the spec that holds this.
+      m.setAttribute("aria-label", "Poppin")
+      return m
+    }
+
     const bellChip = () => {
       const b = document.createElement("button")
       b.className = "ring"
@@ -5274,7 +6005,13 @@ export function createXStrip(deps: XStripDeps): XStripController {
         // impact before any money moves — which is the same sentence this
         // title used to spend a hover on.
         mark.setAttribute("aria-label", "Thin liquidity — a small buy moves the price")
-        renderEnd(bellChip(), walChip(), mark, btn("buy", "Trade", () => openCard("buy")))
+        renderEnd(
+          poppinMark(),
+          bellChip(),
+          walChip(),
+          mark,
+          btn("buy", "Trade", () => openCard("buy")),
+        )
         return
       }
       /**
@@ -5377,6 +6114,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
       buyBtn.addEventListener("pointerleave", disarmHold)
       buyBtn.addEventListener("pointercancel", disarmHold)
       renderEnd(
+        poppinMark(),
         bellChip(),
         walChip(),
         buyBtn,
@@ -5688,6 +6426,9 @@ export function createXStrip(deps: XStripDeps): XStripController {
       void enrich(row.mint).then((m) => {
         if (!capLine.isConnected || !m || typeof m.mcap !== "number" || m.mcap <= 0)
           return
+        // A wrapped mint's cap is the size of the wrapper, never the size
+        // of the company. See helpers/safetyLine.
+        if (!capIsMeaningful(m.issuer)) return
         capLine.textContent = `Market cap ${compactUsd(m.mcap)}`
         capLine.hidden = false
       })
@@ -6126,6 +6867,21 @@ export function createXStrip(deps: XStripDeps): XStripController {
        * side keeps the full-width control it had, and the type becomes a
        * quiet switch riding above it: legible, one tap, never competing.
        */
+      /**
+       * The amount rides across the switch, which looks wrong the first
+       * time you see "$25" over "You hold 0" and is not. The field is in
+       * dollars on both sides, so "sell $25 worth" is a good sentence for
+       * anyone holding that much, and the one case where it is not — a
+       * reader holding nothing — is already answered in words by the door
+       * below: "Nothing to sell". That is louder than the stale figure.
+       *
+       * Tried and reverted, twice, in the order the reasoning improved:
+       * clearing it always, then clearing it when the position could not
+       * cover it. Both broke three specs that sell by switching sides, and
+       * the specs are right — the carry is what makes a two-step sale one
+       * step. The buy side's mismatch was worth fixing because only a
+       * small grey line admitted it; this one says itself.
+       */
       const sideSeg = segmented(["Buy", "Sell"], selling ? 1 : 0, (i) =>
         showSheet({ ...st, side: i === 0 ? "buy" : "sell" }),
       )
@@ -6427,7 +7183,11 @@ export function createXStrip(deps: XStripDeps): XStripController {
       const proofEl = document.createElement("div")
       proofEl.className = "proof"
       proofEl.hidden = true
-      sheet.append(head, proofEl, lblEl("Amount"), amountWrap, sizes)
+      // No "Amount" label: the field wears a $ and sits in a trade sheet,
+      // so the word was a third way of saying the same thing. The advice
+      // that shrinking this sheet would crowd it was right — the answer is
+      // one fewer element, not smaller ones.
+      sheet.append(head, proofEl, amountWrap, sizes)
       if (deps.pageProof) {
         let pf = proofCache.get(tweetUrl)
         if (!pf) {
@@ -6496,7 +7256,12 @@ export function createXStrip(deps: XStripDeps): XStripController {
       sheet.append(cost, safe, msgRow, foot)
       void enrich(row.mint).then((m) => {
         if (!safe.isConnected) return
-        const line = safetyLine(m?.safety ?? null, m?.holderCount ?? null)
+        // A wrapped asset's mint and freeze authorities describe the
+        // wrapper, not the company, and they are how the instrument works
+        // rather than a hazard. See helpers/safetyLine.
+        const line = wrapsSomethingElse(m?.issuer)
+          ? null
+          : safetyLine(m?.safety ?? null, m?.holderCount ?? null)
         /**
          * MARKET CAP LEADS THE LINE. The resting row dropped MC on purpose
          * ("the number lives one tap away in the sheet's safety line") and
@@ -7720,6 +8485,14 @@ export function createXStrip(deps: XStripDeps): XStripController {
     if (actionRow?.parentElement) actionRow.insertAdjacentElement("afterend", host)
     else article.insertAdjacentElement("afterend", host)
     sweep.mounted++
+    if (!toldTheHost) {
+      toldTheHost = true
+      try {
+        deps.onFirstChip?.()
+      } catch {
+        // Whatever the host does with this, it is not the chip's problem.
+      }
+    }
 
     /**
      * ALIGN TO THE ACTION ROW, WHICH IS THE TWEET'S OWN COLUMN.
@@ -7895,6 +8668,20 @@ export function createXStrip(deps: XStripDeps): XStripController {
         if (n.matches?.(CELL)) queue(n)
         else for (const c of n.querySelectorAll?.(CELL) ?? []) queue(c)
       }
+      /**
+       * AND A CHIP THAT WAS TAKEN AWAY. Where the chip sits inside its
+       * cell, its removal is a mutation within the cell and the line above
+       * catches it. Where the cell IS the anchor and the chip is a
+       * sibling, the removal happens on the PARENT and nothing above sees
+       * it — which is exactly how the chip could appear under a headline
+       * and never come back.
+       */
+      for (const n of r.removedNodes) {
+        if (!(n instanceof Element)) continue
+        if (!n.matches?.("[data-poppin-strip]")) continue
+        const owner = el?.querySelector?.(CELL) ?? el?.closest(CELL)
+        if (owner) queue(owner)
+      }
     }
   })
 
@@ -7963,7 +8750,7 @@ export function createXStrip(deps: XStripDeps): XStripController {
  * today; a host that matched two adapters would take the first, which is
  * the right failure because the alternative is two chips on one post.
  */
-export const SITES: readonly SiteAdapter[] = [X_SITE, REDDIT_SITE]
+export const SITES: readonly SiteAdapter[] = [X_SITE, REDDIT_SITE, NEWS_SITE]
 
 export function siteFor(hostname: string): SiteAdapter | null {
   return SITES.find((s) => s.matches(hostname)) ?? null

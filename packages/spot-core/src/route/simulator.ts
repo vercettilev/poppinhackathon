@@ -353,7 +353,25 @@ export async function confirmSignature(
   const sleep =
     opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const timeoutMs = opts.timeoutMs ?? 30_000;
-  const intervalMs = opts.intervalMs ?? 1_000;
+  /**
+   * 300ms, AND THE OLD 1000 WAS COSTING HALF A SECOND OF NOTHING.
+   *
+   * Solana lands a transaction at `confirmed` in roughly 400-800ms. Asking
+   * once a second means the answer is usually sitting there for a few
+   * hundred milliseconds before anybody picks it up, and that dead time is
+   * paid by a reader watching a button say "Popping…". Reported as "buying
+   * is very slow".
+   *
+   * The cost of asking more often is one more getSignatureStatuses call,
+   * against a paid RPC (Helius). Worst case over the full 30s timeout is
+   * 100 polls instead of 30, and the overwhelming majority of confirmations
+   * end in the first two.
+   *
+   * This is not a change to what we claim. The poll is still the authority,
+   * the commitment is unchanged, and `unknown` is still refused as loudly
+   * as `failed`. We are only asking the same question sooner.
+   */
+  const intervalMs = opts.intervalMs ?? 300;
   const resendEveryMs = opts.resendEveryMs ?? 2_000;
 
   const deadline = now() + timeoutMs;
