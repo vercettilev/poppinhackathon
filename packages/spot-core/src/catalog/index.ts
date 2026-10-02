@@ -950,10 +950,12 @@ export const CURATED_CATALOG: readonly CuratedAsset[] = [
     thematic: ['Solana memecoin', 'dog coin', 'community token'],
   },
   // ── EXPANSION 2, probed 2026-08-14 — the tier the first pass left out ─────
-  // PreStocks (pre-IPO exposure: Anthropic, OpenAI, Anduril, Polymarket,
-  // Neuralink, Kalshi — the SPACEX PreStock is deliberately absent: a second
-  // SpaceX row would dominance-kill every SpaceX page). Silver via the one
-  // liquid tokenization of it (Ondo's SLVon; the xStock is dead at $1).
+  // PreStocks (pre-IPO exposure: Anthropic, OpenAI, Anduril, Neuralink.
+  // Polymarket and Kalshi were probed here too and removed 2026-08-25; the
+  // reason is in catalog.spec.ts. The SPACEX PreStock is deliberately
+  // absent: a second SpaceX row would dominance-kill every SpaceX page).
+  // Silver via the one liquid tokenization of it (Ondo's SLVon; the xStock
+  // is dead at $1).
   // Majors/DeFi tier 2, and memecoins down to ~$400k/15k-holders — still
   // burned-authorities-only, still named to be useless as English: bare
   // Orca, Cloud, Grass, Drift, TROLL, NEET, USELESS, Ava, GIGA, Vine, YZY

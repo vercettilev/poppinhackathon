@@ -65,7 +65,7 @@ const CORPUS: Case[] = [
   // ── 2026-08-14 expansion 2: PreStocks positives + the new traps ──────────
   { url: 'https://en.wikipedia.org/wiki/Anthropic', expect: 'ANTHROPIC', why: 'the company itself (PreStocks)' },
   { url: 'https://en.wikipedia.org/wiki/OpenAI', expect: 'OPENAI', why: 'the company itself (PreStocks)' },
-  { url: 'https://en.wikipedia.org/wiki/Polymarket', expect: 'POLYMARKET', why: 'the company itself (PreStocks)' },
+  { url: 'https://en.wikipedia.org/wiki/Polymarket', expect: null, why: 'POLYMARKET row removed 2026-08-25 (see catalog.spec.ts), so no card belongs here' },
   { url: 'https://en.wikipedia.org/wiki/Orca', expect: null, why: 'the whale — bare "Orca" is deliberately not a term' },
   { url: 'https://en.wikipedia.org/wiki/Silver', expect: null, why: 'the metal as chemistry — SLVon needs price-context terms' },
   { url: 'https://en.wikipedia.org/wiki/Vine_(service)', expect: null, why: 'the dead app — VINE coin needs coin-specific phrases' },

@@ -1,6 +1,6 @@
 # Poppin
 
-Poppin lets you buy and sell tokenized stocks inside the tweet, the Reddit post or the news headline you are already reading. You see a post about Tesla on X, and you buy TSLAx right there, in USDC, on Solana. No new tab, no order form, no wallet popup, and the gas is on us.
+Poppin lets you buy and sell tokenized stocks inside the tweet, the Reddit post or the news headline you are already reading. You see a post about Tesla on X, and you buy TSLAx right there, in USDC, on Solana. You read a headline about Anthropic's IPO, and you buy Anthropic before it lists, through PreStocks. No new tab, no order form, no wallet popup, and the gas is on us.
 
 **[Install it from the Chrome Web Store](https://chromewebstore.google.com/detail/poppin-trade-on-your-feed/chhcknncbbmnmhkaacbkfdmkahaemdkk)**. It is live today, and everything described here is what is actually running.
 
@@ -51,6 +51,8 @@ About half of `xMatch.ts` is prose, and the same is true of much of the rest. Ea
 ## What it stands on
 
 We do not create any of these assets. The listed companies come from **xStocks**, the ones that have not gone public come from **PreStocks**, and **Jupiter** handles the routing.
+
+PreStocks is where this gets most interesting. Anthropic, OpenAI, Anduril and Neuralink have no public listing, and Poppin offers all four ([the catalog](packages/spot-core/src/catalog/index.ts)). They go through the same reluctant engine as everything else: a headline about an Anthropic IPO offers Anthropic ([newsSite.spec.ts](extension-new/src/entries/contentScript/x/newsSite.spec.ts)), while a ChatGPT how-to offers nothing, because a page about a product is not a page about the company behind it ([product-vs-company.spec.ts](apps/backend/src/asset-match/product-vs-company.spec.ts)). The trade sheet names PreStocks as the issuer on each one, along with its restriction on US persons.
 
 That matters more than it sounds. A broker cannot put their app inside someone else's web page, so nobody can build this on top of a brokerage. It works because the stock is just a token on Solana. And when someone tokenizes a new company, it shows up in Poppin without us doing anything.
 
